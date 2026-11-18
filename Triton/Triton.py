@@ -65,8 +65,8 @@ def process_fragments_fast(site_reads, start_pos, frag_range, map_q, gc_bias, wi
         if tlen == 0:
             continue
             
-        # One-mate rule: exactly one record per fragment
-        if not ((read.is_read1 and tlen > 0) or (read.is_read2 and tlen < 0)):
+        # One-mate rule: use Read 1 regardless of TLEN sign
+        if not read.is_read1:
             continue
         frag_len = abs(tlen)
         if frag_len < min_frag_size or frag_len > max_frag_size:
