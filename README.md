@@ -7,7 +7,6 @@ As a cell-free DNA (cfDNA) processing pipeline, Triton conducts fragmentomic and
 ## Table of Contents
 
 * [Description](#description)
-* [What's New in v2.0.0](#whats-new-in-v200)
 * [Outputs](#outputs)
 * [Feature Details and Interpretation](#feature-details-and-interpretation)
 * [Publications](#publications)
@@ -35,40 +34,6 @@ Triton is part of *The Pantheon* suite of cfDNA processing and analysis tools. W
 
 <img src="misc/Pantheon.png">
 
-## What's New in v2.0.0
-
-Version 2.0.0 represents a major release with significant improvements to processing and biological interpretability:
-
-### Core Improvements
-
-* **Enhanced GC Correction**: GC bias correction now applies to all fragmentomic analyses, not just coverage, improving accuracy of fragment length distributions and derived metrics
-* **Updated Nucleosome Center Weighting**: New empirically-derived weighting matrix (`NCDict.pkl`) better reflects nucleosome dyad positioning across fragment lengths
-
-### Normalization & Weighting
-
-* **Composite Mode Improvements**: Sites are now weighted by sqrt(N_fragments) instead of N_fragments, better balancing reliability vs. over-dominance of high-depth sites
-* **Flanking Region Strategy**: Expanded flanking regions (5000 bp default) used exclusively for normalization, excluding the analysis window itself for cleaner signal
-* **Window-Normalized Depth**: Now reports both window-normalized depth and central depth metrics (aligned with Griffin methodology)
-
-### Feature & Output Changes
-
-* **Subnucleosomal Threshold**: Fragment length ratio and related metrics now use a biologically-motivated 147 bp threshold (minimum nucleosome wrapping length) instead of 150 bp
-* **Fragment Orientation Asymmetry**: New signal track quantifies directional cleavage patterns: (5' ends - 3' ends) / (5' ends + 3' ends)
-* **Complete Fragment Distributions**: Outputs site-level GC-corrected fragment length distributions for custom downstream analyses
-* **Improved Centering**: Central features now computed at position 0 (window center) rather than detected center, for consistent alignment
-
-### Technical Updates
-
-* **Python 3.13 Support**: Tested and compatible through Python 3.13
-* **Strand Handling**: For composite sites without strand information, uses mirrored averaging (both orientations with 1/2 weight each) instead of random assignment
-* **Simplified Options**: Background panel generation/subtraction mode removed (was experimental with mixed results)
-* **Robust Edge Cases**: Better handling of low-coverage regions and edge cases to prevent NaN propagation
-
-### Performance
-
-* **Memory Optimization**: More efficient array operations and reduced memory overhead for large-scale analyses
-* **Vectorized Operations**: Expanded use of NumPy vectorization for faster processing
-
 ## Outputs
 
 ### Region-Level Features (`_TritonFeatures.tsv`)
@@ -86,8 +51,8 @@ Triton region-level features are output as a `.tsv` file and include for each si
 * **fl-skew**: Skewness of fragment length distribution
 * **fl-kurtosis**: Excess kurtosis of fragment length distribution
 * **fl-subnucleosomal-ratio**: log₂(fraction < 147 bp / fraction ≥ 147 bp)
-* **fl-entropy**: Shannon entropy (Pielou's evenness) of fragment lengths (5-bp binned)
-* **fl-gini-simpson**: Gini-Simpson diversity index of fragment lengths (5-bp binned)
+* **fl-entropy**: Shannon entropy (Pielou's evenness) of fragment lengths (5-bp binned; Miller–Madow bias-corrected in region/window modes)
+* **fl-gini-simpson**: Gini-Simpson diversity index of fragment lengths (5-bp binned; unbiased estimator in region/window modes)
 
 #### Phased-Nucleosome (PN) Features
 
@@ -95,7 +60,7 @@ Triton region-level features are output as a `.tsv` file and include for each si
 
 * **pn-compaction-score**: log₂(amplitude 146–177 bp / amplitude 177–207 bp) — higher indicates compact chromatin
 * **pn-mean-spacing**: Mean inter-nucleosomal distance (bp)
-* **pn-mean-amplitude**: Mean amplitude of phased nucleosome peaks
+* **pn-mean-amplitude**: Mean amplitude of phased nucleosome peaks (half peak-to-trough of the flank-normalized PN signal)
 
 #### Profiling Features
 
@@ -103,40 +68,48 @@ Triton region-level features are output as a `.tsv` file and include for each si
 
 * **mean-region-depth**: Mean GC-corrected coverage (absolute weighted average in composite mode; raw in region/window mode)
 * **central-depth** *: PN signal at window center (mean ±5 bp, normalized by flanking PN signal)
-* **central-entropy** *: FL entropy at window center (mean ±5 bp, robust z-score vs. flanking signal)
-* **central-gini-simpson** *: FL Gini-Simpson at window center (mean ±5 bp, robust z-score vs. flanking signal)
+* **central-gini-simpson** *: FL Gini-Simpson at window center (mean ±5 bp, difference from the flanking median)
 * **window-depth**: PN signal mean across window (normalized by flanking signal)
-* **window-entropy**: FL entropy mean across window (robust z-score vs. flanking signal)
-* **window-gini-simpson**: FL Gini-Simpson mean across window (robust z-score vs. flanking signal)
+* **window-gini-simpson** *: FL Gini-Simpson mean across window (difference from the flanking median)
 
 * Window/composite-window mode only; `np.nan` otherwise
 
+#### Diversity estimators
+
+With few fragments, the plug-in Gini-Simpson index $1-\sum_i \hat p_i^2$ is biased low by the factor $(N-1)/N$, so it tracks coverage. In region/window modes Triton instead reports the unbiased estimator
+
+$\tilde G = \dfrac{W^2-\sum_i W_i^2}{W^2-\sum_j w_j^2} = \dfrac{N_\mathrm{eff}}{N_\mathrm{eff}-1}\Big(1-\sum_i \hat p_i^2\Big), \qquad N_\mathrm{eff} = \dfrac{W^2}{\sum_j w_j^2},$
+
+where $w_j$ are the GC-correction weights of the fragments, $W_i$ their sum in length bin $i$ and $W$ their total; it is the probability that two distinct fragments fall in different length bins. Values are divided by the maximum $1-1/K$ ($K$ = 100 bins), and positions with $N_\mathrm{eff} < 5$ are `np.nan`. The per-position track is reported as the difference from the median of the flanking positions, an effect size on the index's own scale whose expectation does not depend on sequencing depth. Region-level entropy uses the first-order Miller–Madow correction, adding $(m-1)/(2N_\mathrm{eff}\ln 2)$ bits for $m$ occupied bins. In composite-window mode the distributions are pooled over sites and the plug-in estimators are used.
+
 ### Signal Profiles (`_TritonSignalProfiles.npz`)
 
-Triton outputs bp-resolution "signal profiles" as NumPy compressed files (`.npz`), one per sample, containing one array per queried site. For example, 100 composite sites with 2000 bp windows produce 100 arrays of shape `2000×8` (composite) or `2000×12` (window/region). Profiles are not output for regions >5 kb to conserve memory.
+Triton outputs bp-resolution "signal profiles" as NumPy compressed files (`.npz`), one per sample, containing one array per queried site. For example, 100 composite sites with 2000 bp windows produce 100 arrays of shape `2000×8` (composite) or `2000×12` (window). Profiles are not output in region mode.
 
-**Signal tracks (all modes):**
+**Signal tracks (window and composite-window modes):**
 
 1. **Depth**: GC-corrected coverage, normalized by flanking mean
-2. **Fragment End Coverage**: Fragment end density (5' + 3' ends) / total fragments
-3. **Fragment End Orientation Asymmetry**: (5' ends - 3' ends) / (5' + 3' ends) — directional cleavage signature
+2. **5' fragment end density**: GC-corrected count of fragment 5' (upstream) ends, normalized by its flanking mean
+3. **3' fragment end density**: GC-corrected count of fragment 3' (downstream) ends, normalized by its flanking mean
 4. **PN profile**: Phased-nucleosome signal (FFT low-pass filtered, normalized by flanking mean)
-5. **FL subnucleosomal ratio**: log₂(< 147 bp / ≥ 147 bp) at each position
-6. **FL entropy**: Shannon entropy (robust z-score vs. flanking median and MAD)
-7. **FL Gini-Simpson**: Diversity index (robust z-score vs. flanking median and MAD)
+5. **Subnucleosomal depth**: GC-corrected coverage from fragments < 147 bp, normalized by its flanking mean
+6. **Nucleosomal depth**: GC-corrected coverage from fragments ≥ 147 bp, normalized by its flanking mean
+7. **FL Gini-Simpson**: Diversity index (difference from the flanking median)
 8. **PN peak locations**: Local maxima/minima (1: peak, -1: trough)
 
-**Additional tracks (window/region mode only):**
+**Additional tracks (window mode only):**
 
 9. **A**: Adenine (one-hot encoded, based on reference sequence)
 10. **C**: Cytosine (one-hot encoded, based on reference sequence)
 11. **G**: Guanine (one-hot encoded, based on reference sequence)
 12. **T**: Thymine (one-hot encoded, based on reference sequence)
 
+All tracks read 5'→3' along the site's own strand: for `-` strand sites the signals are reversed (with 5' and 3' ends exchanged) and the sequence is the reverse complement of the reference.
+
 ### Additional Outputs
 
 * **Fragment Length Distributions** (`_TritonFragmentationProfiles.npz`): Complete GC-corrected fragment length probability distributions for each site
-* **Skipped Sites** (`_SkippedSites.bed`): Individual site coordinates excluded due to insufficient coverage (< 80% bases covered) or outlier metrics (MAD > 10), with rejection reason and site ID columns
+* **Skipped Sites** (`_SkippedSites.txt`): Site lines that were skipped, with the reason: `malformed_line`, `unrecognized_strand`, `MT_contig` (chrM/chrMT), `unknown_contig` (absent from the reference or alignment), `insufficient_left_flank` / `insufficient_right_flank` (the site plus its flanks reaches past a contig end), `insufficient_coverage` (< 80% bases covered), and in composite-window mode `zero_coverage`, `MAD_outlier` (MAD > 10), `zero_flank_coverage` and `zero_fragments`
 
 ## Feature Details and Interpretation
 
@@ -158,10 +131,8 @@ The following table details each region-level feature with biological context:
 | **pn-mean-amplitude**       | Mean amplitude of periodic PN peaks.                                      | High amplitude = well-phased nucleosomes (stable/quiet); low amplitude = dynamic or disrupted nucleosomes (active).                                                                                                                                                                |
 | **mean-region-depth**       | GC-corrected mean coverage.                                               | Indicates read support. In composite mode, reflects average per-site depth across all contributing windows.                                                                                                                                                                        |
 | **central-depth** *         | PN signal mean ± 5 bp around the center.                                  | Low or negative = nucleosome vacancy or accessible region.                                                                                                                                                                                                                         |
-| **central-entropy** *       | FL entropy mean ± 5 bp around the center.                                 | High = increased heterogeneity, suggesting TF or remodeler binding.                                                                                                                                                                                                                |
-| **central-gini-simpson** *  | FL diversity mean ± 5 bp around the center.                               | Same as entropy: elevated in accessible, dynamic regions.                                                                                                                                                                                                                          |
+| **central-gini-simpson** *  | FL diversity mean ± 5 bp around the center.                               | Elevated in accessible, dynamic regions (TF or remodeler binding).                                                                                                                                                                                                                 |
 | **window-depth**            | PN signal mean across full window.                                        | Low or negative = nucleosome depletion.                                                                                                                                                                                                                                            |
-| **window-entropy**          | FL entropy mean across window.                                            | High = heterogeneous or active region.                                                                                                                                                                                                                                             |
 | **window-gini-simpson**     | FL diversity mean across window.                                          | High = variable fragment lengths → open chromatin.                                                                                                                                                                                                                                 |
 
 * Window/composite-window mode only
@@ -173,12 +144,11 @@ The following table details each bp-resolution signal track:
 | Signal                                        | Description                                                                                   | Biological Interpretation                                                                                    |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | **depth**                                     | GC-corrected coverage normalized to flanks.                                                   | Relative local coverage; correlates with fragment abundance.                                                 |
-| **EPC (fragment end coverage)**               | End-position counts of cfDNA fragments.                                                       | Peaks mark nuclease-accessible linker regions; dips indicate nucleosome cores.                               |
-| **ASYM (fragment end orientation asymmetry)** | Difference between 5′ and 3′ fragment-end coverage (oriented).                                | Sign changes (peak→dip) define nucleosome footprints; large magnitude = strong directional cleavage pattern. |
+| **5′ / 3′ fragment end density**              | End-position counts of cfDNA fragments, by end, normalized to flanks.                         | Peaks mark nuclease-accessible linker regions; a 5′ peak followed by a 3′ peak brackets a protected footprint. |
 | **PN profile**                                | Coverage re-weighted by per-fragment nucleosome-dyad probability and low-pass filtered (FFT). | Highlights constitutive nucleosome phasing and chromatin compaction.                                         |
-| **FL subnucleosomal ratio**                   | log₂ (x < 147 / x ≥ 147) at each bp.                                                          | Local enrichment of sub-nucleosomal fragments → open chromatin, TF binding.                                  |
-| **FL Shannon entropy / Pielou evenness**      | Robust z-score vs median ± MAD of flanking signal.                                            | Elevated = heterogeneous fragment lengths (dynamic chromatin).                                               |
-| **FL Gini-Simpson index**                     | Robust z-score vs flanks.                                                                     | Same interpretation as entropy; robust at lower read depth.                                                  |
+| **Subnucleosomal depth**                      | Coverage from fragments < 147 bp, normalized to flanks.                                       | Local enrichment of sub-nucleosomal fragments → open chromatin, TF binding.                                  |
+| **Nucleosomal depth**                         | Coverage from fragments ≥ 147 bp, normalized to flanks.                                       | Local nucleosome occupancy; dips mark nucleosome-depleted regions.                                           |
+| **FL Gini-Simpson index**                     | Unbiased diversity index, difference from flank median.                                       | Elevated = heterogeneous fragment lengths (dynamic chromatin).                                               |
 | **PN peak locations**                         | Detected PN local maxima.                                                                     | Mark well-phased nucleosomes and enable spacing/compaction quantification.                                   |
 
 ### Complementary Metric Categories
@@ -191,7 +161,7 @@ Triton's features capture distinct aspects of chromatin biology:
 | **Heterogeneity / variability**               | fl-stdev, fl-entropy, fl-gini-simpson, fl-kurtosis      | Capture spread and diversity, which distinguish *mixed* chromatin states even if means are equal.                          |
 | **Shape / asymmetry**                         | fl-skew, fl-kurtosis                                    | Reveal bias toward short or long tails—detect asymmetric cleavage activity.                                                |
 | **Chromatin phasing / compaction**            | pn-compaction-score, pn-mean-spacing, pn-mean-amplitude | Operate in frequency domain, independent of fragment length histogram; reflect higher-order nucleosome array organization. |
-| **Occupancy / accessibility (local signals)** | depth, EPC, ASYM, PN profile                            | Resolve spatial context (linker vs nucleosome center) unavailable to region-level stats.                                   |
+| **Occupancy / accessibility (local signals)** | depth, 5′/3′ end densities, PN profile                  | Resolve spatial context (linker vs nucleosome center) unavailable to region-level stats.                                   |
 
 ### Cohort-Level Analyses
 
@@ -241,8 +211,11 @@ Supplying a GC bias file is **optional**. If omitted, Triton will run without GC
 **annotation**
 
 * In "region" mode, provide a single [BED-like file](https://www.genome.ucsc.edu/FAQ/FAQformat.html#format1) with columns `[chrom, chromStart, chromEnd, name/Gene]`.
-* In "window" mode, a `[position]` column is required to define the window's center.
+* In "window" mode, a `[position]` column defines the window's center.
 * In "composite-window" mode, supply a **text file** containing paths to multiple BED-like files (each with a `[position]` column).
+* Columns are found by name from a header line (`chrom`, `chromStart`/`start`, `chromEnd`/`end`, `name`/`Gene`, `strand`, `position`); without a `position` column the window is centered on the midpoint of start and end. A file without a header line is read in standard BED column order.
+* `strand` may be `+`/`-` (also `1`/`-1`, `plus`/`minus`, `forward`/`reverse`) or unstranded (`.`, `*`, `NA`, empty). Unstranded sites, or files without a strand column, are treated as `+` in region/window mode and averaged over both orientations in composite-window mode.
+* Sites on the mitochondrial contig, on contigs absent from the reference or alignment, or whose flanks (±5 kb) reach past a contig end are skipped and reported in `_SkippedSites.txt`.
 
 Example canonical annotation files are provided in `config/site_lists`:
 
@@ -268,7 +241,6 @@ The `.fa` file must match the build used to align your samples.
 * **Triton/triton_helpers.py** – helper functions called by Triton.py
 * **Triton/triton_cleanup.py** – combines `TritonFeatures.tsv` output from multiple samples
 * **Triton/triton_plotters.py** – plotting utilities for `.npz` outputs
-* **Triton/triton_extractors.py** – extraction utilities for pulling additional, custom features from signal profiles
 * **Triton/nc_dist.py** – a modified script for generating composite nucleosome-center profiles (see [nc_info](#nc_info))
 * **Triton/nc_analyze.py** – used after nc_dist.py to create the frag_dict and plot results (see [nc_info](#nc_info))
 
@@ -287,10 +259,6 @@ Current CLI inputs (see `Triton/triton_plotters.py`):
 * `--region_axis / -r` (optional): set the x-axis origin to the left edge (region-style) instead of the window center.
 
 Run `python Triton/triton_plotters.py -h` for details.
-
-#### triton_extractors.py
-
-`triton_extractors.py` is a simple example script to help extract or transform the `.npz` signal outputs from Triton. Users are encouraged to modify it as needed for custom analyses.
 
 ### nc_info
 
@@ -316,7 +284,7 @@ If you wish to regenerate `NCDict.pkl` with your own site lists or samples, see 
 
 In composite-window mode, signals undergo the following normalization:
 
-1. **Stable flank normalization (depth + nc_signal)**: Composite depth and nc_signal are flank-normalized using a ratio-of-sums estimator. For sites $i$ with weight $w_i$, bp-resolution signal $s_i(x)$, and scalar flank mean $\mu_i$, the composite is:
+1. **Stable flank normalization (depth + nc_signal)**: Composite depth (total, subnucleosomal and nucleosomal) and nc_signal are flank-normalized using a ratio-of-sums estimator. For sites $i$ with weight $w_i$, bp-resolution signal $s_i(x)$, and scalar flank mean $\mu_i$, the composite is:
 
    $S(x) = \frac{\sum_i w_i\,s_i(x)}{\sum_i w_i\,\mu_i}.$
 
@@ -357,11 +325,11 @@ This ensures sites contribute based on fragmentation patterns rather than raw co
 
 Below are examples of output profiles, plotted using triton_plotters.py, illustrating typical outputs.
 
-1. The following figure shows the TSS (promoter) profile for the gene AR across a cohort including ARPC PDX ctDNA, NEPC PDX ctDNA, and Healthy Donor cfDNA. Sequencing depth varies from 5–50× across samples, and subtypes are plotted as the mean and 95% CI across samples in each group. Note that AR is active in AR-driven prostate cancer (ARPC) but not in neuroendocrine-like prostate cancer (NEPC) or in the immune background observed in healthy cfDNA. In both Phased Nucleosomal Signal and Coverage, we observe a dip in ARPC coverage immediately before 0 (the putative TSS), along with a spike at around 125 bp where the +1 nucleosome is expected—indicative of active transcription. A slight increase of fragment ends around the TSS in ARPC samples indicates potential TF (small-footprint) binding. In the Fragment End Orientation signal, a peak → trough diagonal line intersecting 0 indicates regular nucleosome positioning with that approximate footprint, which is observed for the +1 nucleosome for ARPC; a trough → peak diagonal intersecting 0 likewise indicates a nucleosome-depleted region, observed in the same place as the coverage dip. Fragment-length-derived signals are often noisy in single region/window (non-composite) mode at these depths. However, note that ARPC has the highest average subnucleosomal ratio (higher likelihood of TF binding), which is echoed in the Fragment Length Density plot showing a peak of small fragments < 100 bp seen in ARPC but not NEPC. ARPC and NEPC lines are similar throughout, as ctDNA has a shorter canonical length than cfDNA. Dropout is observed on the right side of both diversity signals, reflecting near-zero coverage in that area.
+1. The following figure shows the TSS (promoter) profile for the gene AR across a cohort including ARPC PDX ctDNA, NEPC PDX ctDNA, and Healthy Donor cfDNA. Sequencing depth varies from 5–50× across samples, and subtypes are plotted as the mean and 95% CI across samples in each group. Note that AR is active in AR-driven prostate cancer (ARPC) but not in neuroendocrine-like prostate cancer (NEPC) or in the immune background observed in healthy cfDNA. In both Phased Nucleosomal Signal and Coverage, we observe a dip in ARPC coverage immediately before 0 (the putative TSS), along with a spike at around 125 bp where the +1 nucleosome is expected—indicative of active transcription. A slight increase of fragment ends around the TSS in ARPC samples shows strong binding of a +1 nucleosome (5' spike around 0, 3' spike around 125bp). Fragment-length-derived signals are often noisy in single region/window (non-composite) mode at these depths. However, note that the dip-peak pattern is stronger in the nucleosomal coverage window, and there is a slight increase in FL Gini-Simpson Index, corresponding to greater heterogeneity and potential TF binding, near 0.
 
 <img src="misc/AR-Profiles_CRPC.png">
 
-2. The next figure again looks at healthy donor cfDNA and PDX ctDNA, here from small cell lung cancer (SCLC) models with ATOH1+NEUROD1, NEUROD1, or ASCL1 positive molecular subtypes with depth from 5-50x. Whereas the previous figure showed a single TSS, this is using a composite-window TFBS run where the 1,000 sites per TF, in this case NEUROD1, are used. All plots have left-right (or rotational in the case of Fragment End Orientation) symmetry reflecting unknown TF-binding orientation at each site. A clear central dip in NEUROD1+ groups in both Phased Nucleosomal Signal and Coverage indicate NEUROD1 activity/binding, as does an increase in small fragment footprints around 0. The clear dip -> trough diagonal intersect at 0 across all groups in the Fragment End Orientation signal indicates nucleosome depletion; this is most prominent for the NEUROD1+ lines, where the greater separation also implies a wider depletion area. In general, the peak/trough edges in the Fragment End Orientation signals roughly correspond to the boundaries between nucleosome occupied vs unoccupied regions. In the Fragment Length-Derived Signals we again see ctDNA groups showing a shorter overall fragment length distribution compared to healthy cfDNA, however with greater relative depth achieved through compositing sites we also see a clear peak in fragment length diversity around 0 in both NEUROD1+ groups.
+2. The next figure again looks at healthy donor cfDNA and PDX ctDNA, here from small cell lung cancer (SCLC) models with ATOH1+NEUROD1, NEUROD1, or ASCL1 positive molecular subtypes with depth from 5-50x. Whereas the previous figure showed a single TSS, this is using a composite-window TFBS run where the 1,000 sites per TF, in this case NEUROD1, are used. A clear central dip in NEUROD1+ groups in both Phased Nucleosomal Signal and Coverage (all, short, and long) indicate NEUROD1 activity/binding, as does an increase in fragment heterogeneity around 0 in the Gini-Simpson Index signal. In general, the peak/trough edges in the Fragment End Orientation signals roughly correspond to the boundaries between nucleosome occupied vs unoccupied regions, with the left shift in 5' and right shift in 3' showing clear single-nucleosome depletion around 0.
 
 <img src="misc/NEUROD1-Profiles_SCLC.png">
 

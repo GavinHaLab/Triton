@@ -30,8 +30,42 @@ def get_index(header, names, default, message):
             return header.index(name)
         except ValueError:
             continue
-    print(message.format(default, header[default] if default is not None else 'N/A'))
+    print(message.format(default, header[default] if default is not None and default < len(header) else 'N/A'))
     return default
+
+
+# Standard BED field order, assumed for site lists without a header line
+BED_FIELDS = ['chrom', 'chromStart', 'chromEnd', 'name', 'score', 'strand']
+
+
+def bed_header(first_line):
+    """
+    Column names of a BED-like site list, given its first line.
+        Returns:
+            header (list of str): the first line's fields if it is a header; if it is already a site (integer start
+                and end in columns 2 and 3), the standard BED field names for that many columns.
+            has_header (bool): whether the first line is a header (and so must not be read as a site).
+    """
+    tokens = first_line.strip().split('\t')
+    if len(tokens) >= 3 and tokens[1].isdigit() and tokens[2].isdigit():
+        extra = [f'column{index + 1}' for index in range(len(BED_FIELDS), len(tokens))]
+        return BED_FIELDS[:len(tokens)] + extra, False
+    return tokens, True
+
+
+def parse_strand(token):
+    """
+    Normalizes a strand field to '+', '-', or None (unstranded: '.', '*', 'NA' or empty).
+    Raises ValueError for any other value, so that a mislabeled site is skipped rather than oriented by guess.
+    """
+    value = token.strip().lower()
+    if value in ('+', '+1', '1', 'plus', 'forward', 'fwd', 'f'):
+        return '+'
+    if value in ('-', '-1', 'minus', 'reverse', 'rev', 'r'):
+        return '-'
+    if value in ('.', '*', '', 'na', 'nan', 'none'):
+        return None
+    raise ValueError(f'Unrecognized strand value: {token!r}')
 
 
 def one_hot_encode(seq):
@@ -68,14 +102,15 @@ def get_gc_bias_dict(bias_path):
     return bias_dict
 
 
-def frag_metrics(frag_prob_dist, reduce=False, bins=None):
+def frag_metrics(frag_prob_dist, bins=None, n_eff=None):
     """
     Returns various metrics of fragment lengths given a probability distribution.
     
     Parameters:
         frag_prob_dist (np.array): 1D array of fragment length probabilities (sums to 1.0), where index is fragment length - 1 (1-indexed)
-        reduce (bool): if true, only output ratio, entropy, and Gini-Simpson index (save time on signal profiles)
         bins (list/tuple): Pre-computed bins as (bin_start_indices, num_bins). Used only for entropy/Gini-Simpson calculation.
+        n_eff (float): effective number of fragments behind the distribution; if given, entropy and Gini-Simpson are
+            corrected for finite-sample bias (see diversity_metrics).
     
     Returns:
         Tuple containing:
@@ -87,12 +122,11 @@ def frag_metrics(frag_prob_dist, reduce=False, bins=None):
             - entropy (float) - computed on binned data
             - gini_simpson (float) - computed on binned data
     """
-    # Calculate effective sample size: n_eff = 1 / sum(p_i^2)
-    # This accounts for the information content in the probability distribution
+    # Effective number of distinct fragment lengths, 1 / sum(p_i^2). It cannot exceed the effective number of
+    # fragments, so requiring 5 also guarantees enough fragments for the bias corrections below.
     sum_p_squared = np.sum(frag_prob_dist ** 2)
-    n_eff = 1.0 / sum_p_squared if sum_p_squared > 0 else 0
-    if n_eff < 5:  # Minimum effective sample size for reliable metrics
-        return (np.nan,) * (3 if reduce else 7)
+    if sum_p_squared <= 0 or 1.0 / sum_p_squared < 5:
+        return (np.nan,) * 7
 
     # Subnucleosomal ratio: computed on 1-bp resolution (threshold at 147 bp)
     frag_short = np.sum(frag_prob_dist[:146])
@@ -100,11 +134,7 @@ def frag_metrics(frag_prob_dist, reduce=False, bins=None):
     ratio = np.nan if frag_long == 0 else frag_short / frag_long
     
     # Diversity metrics - always computed on binned data for smoothing
-    entropy, gini_simpson = diversity_metrics(frag_prob_dist, bins=bins)
-    
-    # For reduce mode, skip moment calculations
-    if reduce:
-        return ratio, entropy, gini_simpson
+    entropy, gini_simpson = diversity_metrics(frag_prob_dist, bins=bins, n_eff=n_eff)
 
     # Statistical moments - computed on 1-bp resolution for accurate distribution representation
     indices = np.arange(1, len(frag_prob_dist) + 1)
@@ -128,12 +158,16 @@ def frag_metrics(frag_prob_dist, reduce=False, bins=None):
     return mean, stdev, skew, kurtosis, ratio, entropy, gini_simpson
 
 
-def diversity_metrics(prob_dist, bins=None):
+def diversity_metrics(prob_dist, bins=None, n_eff=None):
     """
     Returns the max-normalized Shannon Entropy and Gini-Simpson index (1 - sum(p_i^2)) for binned probability distribution (5bp bins)
         Parameters:
             prob_dist (list/array): 1D array of fragment length probabilities (sums to 1.0), where index is fragment length -1 (1-indexed).
             bins (list/tuple): Pre-computed bins as (bin_start_indices, num_bins). If None, bins will be computed.
+            n_eff (float): effective number of fragments behind prob_dist, (sum of weights)^2 / (sum of squared weights).
+                If given, both indices are corrected for the downward bias of plug-in estimates from few fragments:
+                Gini-Simpson by the exact factor n_eff / (n_eff - 1), entropy by the first-order Miller-Madow term
+                (occupied bins - 1) / (2 n_eff ln 2) bits.
         Returns:
             tuple: (float: Max-normalized Shannon Entropy, float: Gini-Simpson index (max-normalized))
     """
@@ -188,6 +222,8 @@ def diversity_metrics(prob_dist, bins=None):
     
     # Gini-Simpson calculation (vectorized)
     gs_index = 1.0 - np.sum(pdist * pdist)
+    if n_eff is not None:
+        gs_index *= n_eff / (n_eff - 1.0)
     max_gs = 1.0 - 1.0/num_bins
     gs_index = gs_index / max_gs if max_gs > 0 else np.nan
     
@@ -198,9 +234,42 @@ def diversity_metrics(prob_dist, bins=None):
         # Use masked array for cleaner calculation
         p_nonzero = pdist[mask]
         log2_p = np.log2(p_nonzero)
-        entropy = -np.sum(p_nonzero * log2_p) / np.log2(num_bins)
+        entropy_bits = -np.sum(p_nonzero * log2_p)
+        if n_eff is not None:
+            entropy_bits += (np.count_nonzero(mask) - 1) / (2.0 * n_eff * np.log(2))
+        entropy = entropy_bits / np.log2(num_bins)
     
     return entropy, gs_index
+
+
+def gini_simpson_profile(binned_profile, weight_sq=None):
+    """
+    Max-normalized Gini-Simpson index of the fragment length distribution at every position.
+        Parameters:
+            binned_profile (np.array): (fragment length bin x position) matrix of GC-corrected fragment depth, or of
+                site-averaged probability distributions in composite mode.
+            weight_sq (np.array): per-position sum of squared fragment weights. If given, the estimator is unbiased:
+                (W^2 - sum_i W_i^2) / (W^2 - sum_j w_j^2), the chance that two distinct fragments covering the position
+                (drawn in proportion to their weights w_j) fall in different length bins. This equals the plug-in
+                index times n_eff / (n_eff - 1) with n_eff = W^2 / sum_j w_j^2, so its expectation does not depend
+                on depth. If None, the plug-in index 1 - sum_i p_i^2 is returned (composite mode, where the
+                distribution is pooled over many sites and the plug-in bias is negligible).
+        Returns:
+            np.array: index per position; NaN where there are no fragments or, with weight_sq, where n_eff < 5.
+    """
+    num_bins = binned_profile.shape[0]
+    total_sq = binned_profile.sum(axis=0, dtype=np.float64) ** 2
+    bin_sq = np.einsum('ij,ij->j', binned_profile, binned_profile, dtype=np.float64)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        if weight_sq is None:
+            gs_index = 1.0 - bin_sq / total_sq
+            valid = total_sq > 0
+        else:
+            gs_index = (total_sq - bin_sq) / (total_sq - weight_sq)
+            valid = total_sq >= 5 * weight_sq
+    gs_index /= 1.0 - 1.0 / num_bins
+    gs_index[~valid | (total_sq <= 0)] = np.nan
+    return gs_index
 
 
 def local_peaks(ys):

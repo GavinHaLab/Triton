@@ -8,12 +8,12 @@
 """
 N.B. the numpy array ordering of profile objects:
 1: Depth (GC-corrected, normalized by mean flanking depth)
-2: Fragment end coverage (fraction of 5'+3' fragment ends / total fragments at each position, normalized by mean flanking end coverage)
-3: Fragment end orientation asymmetry ((5' - 3') / (5' + 3') at each position)
+2: 5' fragment end density (GC-corrected, normalized by mean flanking 5' end density)
+3: 3' fragment end density (GC-corrected, normalized by mean flanking 3' end density)
 4: PN profile (normalized by mean flanking signal in NC signal, pre-FFT)
-5: FL subnucleosomal ratio [log2(x < 147 / x >= 147)]
-6: FL Shannon Entropy / Pielou's Evenness (robust z-score using median and MAD of flanking signal)
-7: FL Gini-Simpson index (robust z-score using median and MAD of flanking signal)
+5: Subnucleosomal depth (fragments < 147 bp, GC-corrected, normalized by mean flanking subnucleosomal depth)
+6: Nucleosomal depth (fragments >= 147 bp, GC-corrected, normalized by mean flanking nucleosomal depth)
+7: FL Gini-Simpson index (difference from the median flanking index)
 8: PN peak locations (-1: trough, 1: peak)
 9: A (Adenine)**
 10: C (Cytosine)**
@@ -37,18 +37,19 @@ from scipy.integrate import trapezoid
 warnings.filterwarnings('ignore', 'The figure layout has changed to tight', UserWarning)
 
 # pretty column names (nucleotide frequencies removed)
-cols = ['raw-depth', 'frag-ends', 'frag-orient', 'pn-signal', 'fl-ratio', 'fl-entropy',
+cols = ['raw-depth', 'frag-ends-5', 'frag-ends-3', 'pn-signal', 'short-depth', 'long-depth',
         'fl-gini-simpson', 'peaks']
-pretty_cols = ['Coverage (GC-Corrected, Flank-Normalized)', 'Fragment End Coverage (Flank-Normalized, Smoothed)', 'Fragment End Orientation (Smoothed)', 'Phased Nucleosomal Signal (Flank-Normalized)',
-               'FL Subnucleosomal Ratio (<147bp/>=147bp)', 'FL Shannon Entropy (Pielou\'s Evenness)', 'FL Gini-Simpson Index', 'Called Peaks']
+pretty_cols = ['Coverage (GC-Corrected, Flank-Normalized)', '5\' Fragment End Density (Flank-Normalized, Smoothed)', '3\' Fragment End Density (Flank-Normalized, Smoothed)', 'Phased Nucleosomal Signal (Flank-Normalized)',
+               'Subnucleosomal Coverage (<147bp, Flank-Normalized)', 'Nucleosomal Coverage (>=147bp, Flank-Normalized)',
+               'FL Gini-Simpson Index', 'Called Peaks']
 col_map = {col: pretty_cols[i] for i, col in enumerate(cols)}
 profile_labels = {'raw-depth': 'Depth',
-                  'frag-ends': 'End fraction',
-                  'frag-orient': '5\'/3\' asymmetry',
+                  'frag-ends-5': 'End density',
+                  'frag-ends-3': 'End density',
                   'pn-signal': 'PN depth',
-                  'fl-ratio': 'Proportion (log2)',
-                  'fl-entropy': 'Robust z-score',
-                  'fl-gini-simpson': 'Robust z-score'}
+                  'short-depth': 'Depth',
+                  'long-depth': 'Depth',
+                  'fl-gini-simpson': 'Difference from flanks'}
 
 
 def smooth_data(data, window=75, fill_nans=True, fill_value=0.0):
@@ -201,47 +202,20 @@ def plot_profiles(name, data, region, fragmentation_data, samples, palette=None,
     sns.set_context("notebook", font_scale=1.1)
 
     # Define the profiles we want to plot and their organization (nucleotide variation removed)
-    left_profiles = ['pn-signal', 'raw-depth', 'frag-ends', 'frag-orient']
-    right_profiles = ['fl-ratio', 'fl-entropy', 'fl-gini-simpson']
+    left_profiles = ['pn-signal', 'raw-depth', 'frag-ends-5', 'frag-ends-3']
+    right_profiles = ['short-depth', 'long-depth', 'fl-gini-simpson']
     
     # Filter data to only include our desired profiles
     all_profiles = left_profiles + right_profiles
     data = data[data['profile'].isin(all_profiles)].copy()
-    
-    # First, pre-process asymmetry by filling NaNs with zeros before any other processing
-    if 'frag-orient' in all_profiles:
-        for sample in data[data['profile'] == 'frag-orient']['sample'].unique():
-            mask = (data['profile'] == 'frag-orient') & (data['sample'] == sample)
-            values = data.loc[mask, 'value'].values
-            
-            # Replace NaNs with zeros in asymmetry data
-            nan_mask = np.isnan(values)
-            if np.any(nan_mask):
-                values_filled = values.copy()
-                values_filled[nan_mask] = 0.0
-                data.loc[mask, 'value'] = values_filled
 
-    # No log2 scaling needed: fl-ratio is already pre-log2'd and frag-ends are fractions (0-1)
-    # All signals are used as-is from Triton output
-    
-    # Apply smoothing based on profile-specific requirements
-    if 'frag-ends' in all_profiles:
-        for sample in data[data['profile'] == 'frag-ends']['sample'].unique():
-            mask = (data['profile'] == 'frag-ends') & (data['sample'] == sample)
+    # End densities are sparse per-bp counts (linear tracks), so they are smoothed for display, preserving NaNs
+    for end_profile in ('frag-ends-5', 'frag-ends-3'):
+        for sample in data[data['profile'] == end_profile]['sample'].unique():
+            mask = (data['profile'] == end_profile) & (data['sample'] == sample)
             values = data.loc[mask, 'value'].values
             original_dtype = values.dtype
-            # Smooth fragment ends while preserving NaNs
             smoothed = smooth_data(values, fill_nans=False)
-            if len(smoothed) == len(values):
-                data.loc[mask, 'value'] = smoothed.astype(original_dtype)
-    
-    if 'frag-orient' in all_profiles:
-        for sample in data[data['profile'] == 'frag-orient']['sample'].unique():
-            mask = (data['profile'] == 'frag-orient') & (data['sample'] == sample)
-            values = data.loc[mask, 'value'].values
-            original_dtype = values.dtype
-            # Smooth orientation asymmetry (NaNs already filled with zeros)
-            smoothed = smooth_data(values, fill_nans=True, fill_value=0.0)
             if len(smoothed) == len(values):
                 data.loc[mask, 'value'] = smoothed.astype(original_dtype)
 
@@ -263,9 +237,9 @@ def plot_profiles(name, data, region, fragmentation_data, samples, palette=None,
     # Left column: 4 signal plots (nucleotide variation removed)
     left_gs = fig.add_gridspec(4, 1, left=0.05, right=0.48, top=0.88, bottom=0.1, hspace=0.4)
     
-    # Right column: 3 signal plots 
+    # Right column: 3 signal plots plus the fragment length density row
     right_signal_gs = fig.add_gridspec(4, 2, left=0.55, right=0.95, top=0.88, bottom=0.1, hspace=0.4, wspace=0.3)
-    
+
     # Add column titles (closer to signals)
     fig.text(0.265, 0.93, 'Fragment Coverage Signals', ha='center', va='top', fontsize=14, fontweight='bold')
     fig.text(0.75, 0.93, 'Fragment Length-Derived Signals', ha='center', va='top', fontsize=14, fontweight='bold')
@@ -309,13 +283,6 @@ def plot_profiles(name, data, region, fragmentation_data, samples, palette=None,
         
         ax.set_ylabel(extended_profile_labels[left_profiles[i]], fontsize=10)
         ax.set_title(profile_name, fontsize=11, pad=5)
-        
-        # Special handling for orientation asymmetry
-        if left_profiles[i] == 'frag-orient':
-            ax.axhline(y=0, color='gray', linestyle=':', alpha=0.5, zorder=0)
-            ylim = ax.get_ylim()
-            max_abs_y = max(abs(ylim[0]), abs(ylim[1]))
-            ax.set_ylim(-max_abs_y, max_abs_y)
         
         # Only show x-axis label on bottom plot
         if i == len(left_profiles) - 1:
@@ -367,8 +334,8 @@ def plot_profiles(name, data, region, fragmentation_data, samples, palette=None,
         ax.set_xlim(xmin, xmax)
     
     # Fragment plot should align with a single signal plot height but be 2/3 width
-    # Get the position of row 3 for height alignment
-    row3_subplot_spec = right_signal_gs[3, :]  # Full row 3
+    # Get the position of the last row for height alignment
+    row3_subplot_spec = right_signal_gs[3, :]  # Full last row
     row3_pos = row3_subplot_spec.get_position(fig)
     
     # Calculate 2/3 width of the signal plot area
@@ -717,8 +684,8 @@ def main():
                 if len(data_array.shape) != 2:
                     continue
 
-                # Create a DataFrame for the sample - use only first 8 channels
-                data_to_use = data_array[:8, :] if data_array.shape[0] >= 8 else data_array
+                # Create a DataFrame for the sample - use only the signal channels (no nucleotide channels)
+                data_to_use = data_array[:len(cols), :]
                 channels_used = data_to_use.shape[0]
 
                 tdf = pd.DataFrame(data_to_use.T, columns=cols[:channels_used])
